@@ -1,0 +1,14 @@
+{
+  "name": "baseball-lottery-game",
+  "private": true,
+  "version": "0.1.0",
+  "description": "NPB非公式・架空ポイントで遊ぶ野球くじシミュレーションゲーム(フェーズ0/1)",
+  "type": "module",
+  "scripts": {
+    "seed:games": "node scripts/seed-games.mjs",
+    "set:admin": "node scripts/set-admin-claim.mjs"
+  },
+  "devDependencies": {
+    "firebase-admin": "^12.0.0"
+  }
+}

@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>野球くじシミュレーター(仮)</title>
+<meta name="description" content="架空ポイントを賭けて遊ぶ、NPB非公式の野球くじ予想シミュレーションゲーム" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%BE%EF%B8%8F%3C/text%3E%3C/svg%3E" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+
+  <header class="sticky top-0 z-20 bg-slate-950/90 backdrop-blur border-b border-slate-800 px-4 py-3">
+    <div class="max-w-5xl mx-auto flex items-center justify-between gap-3">
+      <div>
+        <h1 class="text-lg sm:text-xl font-bold tracking-tight">
+          ⚾ 野球くじシミュレーター<span class="text-xs align-top text-amber-400 ml-1">(仮)</span>
+        </h1>
+        <p class="text-[11px] text-slate-400">架空ポイントで遊ぶ、NPB非公式の予想エンタメゲームです</p>
+      </div>
+      <div class="text-right text-sm shrink-0">
+        <div class="text-slate-400 text-[11px]">保有ポイント</div>
+        <div id="user-points" class="text-xl font-bold text-amber-400">--- pt</div>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-5xl mx-auto px-4 py-6 space-y-8">
+    <section id="status-banner" class="hidden"></section>
+
+    <section>
+      <h2 class="text-base font-bold mb-3 flex items-center gap-2"><span>🎟️</span>本日の対象試合</h2>
+      <div id="games-list" class="grid gap-4 sm:grid-cols-2">
+        <div class="text-slate-500 text-sm">読み込み中...</div>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="text-base font-bold mb-3 flex items-center gap-2"><span>📈</span>ポイント推移 / 的中率</h2>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <p class="text-xs text-slate-400 mb-2">累計ポイント推移</p>
+          <canvas id="points-chart" height="180"></canvas>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <p class="text-xs text-slate-400 mb-2">あなた vs AI 的中数</p>
+          <canvas id="accuracy-chart" height="180"></canvas>
+          <p id="accuracy-summary" class="text-xs text-slate-400 mt-2">まだ判定済みの予想がありません。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="admin-section" class="hidden">
+      <details class="bg-slate-900 border border-amber-700/40 rounded-xl">
+        <summary class="cursor-pointer px-4 py-3 text-sm font-bold text-amber-400">
+          🛠 管理者用パネル(結果反映デモ)
+        </summary>
+        <div id="admin-games" class="px-4 pb-4 space-y-3 text-sm"></div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="max-w-5xl mx-auto px-4 py-8 text-[11px] leading-relaxed text-slate-500 border-t border-slate-800 mt-8 space-y-1">
+    <p>※ 本サービスは実際の金銭を賭けるものではなく、架空ポイントを用いたエンターテインメント(シミュレーションゲーム)です。</p>
+    <p>※ 本サービスはNPB(日本野球機構)および各球団による公式サービスではありません。実在の球団名は説明のために使用しており、選手個人を予想対象とはしていません。</p>
+    <p>※ 表示されるチーム成績・試合日程・オッズはすべて仮のデモデータです。</p>
+  </footer>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+    import {
+      getAuth, signInAnonymously, onAuthStateChanged,
+    } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+    import {
+      getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot,
+      collection, query, where, getDocs, serverTimestamp,
+      runTransaction, arrayUnion,
+    } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+    import {
+      getTeam, buildSeedGames, judgeBet, judgeAiPick, simulateGameScore,
+    } from "./js/lottery-core.mjs";
+
+    /* =======================================================================
+     * Firebase設定
+     * Firebaseコンソール(プロジェクトの設定 > 全般 > マイアプリ)で発行される
+     * 設定値に置き換えてください。事前に Authentication > Anonymous と
+     * Firestore Database を有効化しておく必要があります。
+     * ======================================================================= */
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID",
+    };
+
+    const STARTING_POINTS = 1000;
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    const el = (id) => document.getElementById(id);
+
+    /* =======================================================================
+     * 0. 動作確認用セルフテスト(コンソールログ)
+     * Firebase接続とは独立に、シミュレーション/オッズ計算ロジック(js/lottery-core.mjs)
+     * が単体で正しく動くことをコンソールで確認できるようにしている。
+     * ======================================================================= */
+    function runSelfTest() {
+      console.group('[selftest] シミュレーション/オッズ計算ロジック');
+      const sample = buildSeedGames(Date.now());
+      for (const g of sample) {
+        const home = getTeam(g.home_team_id);
+        const away = getTeam(g.away_team_id);
+        console.log(
+          `${home.team_name} vs ${away.team_name} | 勝率 ${(g.market.homeWinProb * 100).toFixed(1)}%-${(g.market.awayWinProb * 100).toFixed(1)}% ` +
+          `| オッズ ${g.market.homeOdds}倍-${g.market.awayOdds}倍 | 合計${g.market.totalLine}点 O:${g.market.overOdds}倍 U:${g.market.underOdds}倍`
+        );
+        console.assert(g.market.homeOdds >= 1.1 && g.market.homeOdds <= 10, 'オッズは1.1〜10倍の範囲であるべき');
+        console.assert(Math.abs(g.market.homeWinProb + g.market.awayWinProb - 1) < 1e-9, '勝率の合計は1であるべき');
+      }
+      console.groupEnd();
+    }
+    runSelfTest();
+
+    /* =======================================================================
+     * 1. 状態
+     * ======================================================================= */
+    let currentUid = null;
+    let isAdminUser = false;
+    const gamesCache = new Map(); // game_id -> game doc data
+    const myBetsCache = new Map(); // game_id -> bet doc data
+    let pointsChart = null;
+    let accuracyChart = null;
+
+    function showBanner(msg, type = 'info') {
+      const b = el('status-banner');
+      b.textContent = msg;
+      b.classList.remove('hidden');
+      b.className = `text-sm rounded-lg px-3 py-2 border ${
+        type === 'error'
+          ? 'bg-rose-500/10 border-rose-500/40 text-rose-300'
+          : 'bg-slate-800 border-slate-700 text-slate-300'
+      }`;
+    }
+
+    /* =======================================================================
+     * 2. 認証 + 初期化
+     * ======================================================================= */
+    onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        signInAnonymously(auth).catch((err) => {
+          console.error(err);
+          showBanner(
+            `匿名ログインに失敗しました(${err.code}）。firebaseConfigをご自身のFirebaseプロジェクトの値に置き換え、Authentication > Anonymous を有効化してください。`,
+            'error'
+          );
+        });
+        return;
+      }
+      currentUid = user.uid;
+      const tokenResult = await user.getIdTokenResult();
+      isAdminUser = tokenResult.claims.admin === true;
+      el('admin-section').classList.toggle('hidden', !isAdminUser);
+
+      try {
+        await ensureUserDoc(currentUid);
+        await seedGamesIfMissing_DevFallback();
+        subscribeGames();
+        subscribeMyBets();
+        subscribeUserDoc();
+      } catch (err) {
+        console.error(err);
+        showBanner(`初期化に失敗しました: ${err.message}`, 'error');
+      }
+    });
+
+    async function ensureUserDoc(uid) {
+      const ref = doc(db, 'users', uid);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) {
+        await setDoc(ref, {
+          display_name: `ゲスト-${uid.slice(0, 6)}`,
+          total_points: STARTING_POINTS,
+          prediction_history: [],
+          point_history: [
+            { at: new Date().toISOString(), total_points: STARTING_POINTS, note: '初期付与' },
+          ],
+        });
+      }
+    }
+
+    // 開発用フォールバック:
+    // 本来は `npm run seed:games` (scripts/seed-games.mjs / Admin SDK) を1度実行して
+    // 試合データを投入する想定(firestore.rulesではgamesへの書き込みはadminのみ許可)。
+    // Firestoreを「テストモード」のまま試している開発者でもすぐ動作確認できるよう、
+    // games コレクションが空でクライアントからの書き込みが許可されている場合に限り、
+    // ここでもシードを試みる。正規のセキュリティルールを既に適用済みの環境では、
+    // この書き込みは permission-denied で失敗し、黙ってスキップされるだけで問題ない。
+    async function seedGamesIfMissing_DevFallback() {
+      try {
+        const snap = await getDocs(collection(db, 'games'));
+        if (!snap.empty) return;
+        const games = buildSeedGames(Date.now());
+        for (const game of games) {
+          await setDoc(doc(db, 'games', game.game_id), game);
+        }
+        console.info('[seed] 開発用フォールバックで試合データを投入しました');
+      } catch (err) {
+        console.info(
+          '[seed] クライアントからのシードはスキップしました(権限なし、または投入済み)。' +
+          '本番相当のルールを使う場合は `npm run seed:games` を実行してください。',
+          err.code || err.message
+        );
+      }
+    }
+
+    /* =======================================================================
+     * 3. Firestore購読
+     * ======================================================================= */
+    function subscribeGames() {
+      onSnapshot(collection(db, 'games'), (snap) => {
+        gamesCache.clear();
+        snap.forEach((d) => gamesCache.set(d.id, d.data()));
+        renderGames();
+        renderAdminPanel();
+        renderAccuracy();
+      }, (err) => showBanner(`試合データの取得に失敗しました: ${err.message}`, 'error'));
+    }
+
+    function subscribeMyBets() {
+      const qy = query(collection(db, 'bets'), where('user_id', '==', currentUid));
+      onSnapshot(qy, (snap) => {
+        myBetsCache.clear();
+        snap.forEach((d) => myBetsCache.set(d.data().game_id, { id: d.id, ...d.data() }));
+        renderGames();
+        renderAccuracy();
+      }, (err) => showBanner(`予想履歴の取得に失敗しました: ${err.message}`, 'error'));
+    }
+
+    function subscribeUserDoc() {
+      onSnapshot(doc(db, 'users', currentUid), (snap) => {
+        const data = snap.data();
+        if (!data) return;
+        el('user-points').textContent = `${data.total_points.toLocaleString()} pt`;
+        renderPointsChart(data.point_history || []);
+      }, (err) => showBanner(`ユーザーデータの取得に失敗しました: ${err.message}`, 'error'));
+    }
+
+    /* =======================================================================
+     * 4. 試合表示ロジック
+     * ======================================================================= */
+    function isBettable(game) {
+      return game.status === 'scheduled' && Date.now() < new Date(game.game_date).getTime();
+    }
+
+    function getDisplayStatus(game) {
+      if (game.status === 'canceled') return { label: '中止(返金済み)', tone: 'slate' };
+      if (game.status === 'finished') return { label: '確定済み', tone: 'emerald' };
+      if (isBettable(game)) return { label: '受付中', tone: 'amber' };
+      return { label: '締切(結果待ち)', tone: 'slate' };
+    }
+
+    function describeBet(bet) {
+      if (bet.bet_type === 'winner') return `${getTeam(bet.bet_value).team_name}の勝利`;
+      return `合計得点 ${bet.bet_value.pick === 'over' ? 'オーバー' : 'アンダー'}(${bet.bet_value.line})`;
+    }
+
+    function renderGames() {
+      const wrap = el('games-list');
+      const games = [...gamesCache.values()].sort((a, b) => new Date(a.game_date) - new Date(b.game_date));
+      if (games.length === 0) {
+        wrap.innerHTML = `<div class="text-slate-500 text-sm">試合データがまだありません。<code>npm run seed:games</code> を実行してください。</div>`;
+        return;
+      }
+      wrap.innerHTML = games.map((g) => renderGameCard(g)).join('');
+    }
+
+    function renderGameCard(game) {
+      const home = getTeam(game.home_team_id);
+      const away = getTeam(game.away_team_id);
+      const status = getDisplayStatus(game);
+      const myBet = myBetsCache.get(game.game_id);
+      const bettable = isBettable(game) && !myBet;
+      const dateLabel = new Date(game.game_date).toLocaleString('ja-JP', {
+        month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      });
+
+      const toneClass = {
+        amber: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+        emerald: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+        slate: 'bg-slate-700/30 text-slate-400 border-slate-600/40',
+      }[status.tone];
+
+      const resultBlock = game.result
+        ? `<div class="text-xs bg-slate-800/60 rounded-lg px-3 py-2 mb-3">
+             最終結果: ${home.team_name} ${game.result.home_score} - ${game.result.away_score} ${away.team_name}
+           </div>`
+        : '';
+
+      const myBetBlock = myBet
+        ? `<div class="text-xs rounded-lg px-3 py-2 mb-3 border ${
+            myBet.result === 'hit'
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+              : myBet.result === 'miss'
+              ? 'border-rose-500/40 bg-rose-500/10 text-rose-300'
+              : myBet.result === 'void'
+              ? 'border-slate-600/40 bg-slate-800/60 text-slate-400'
+              : 'border-slate-600/40 bg-slate-800/60 text-slate-300'
+          }">
+            あなたの予想: ${describeBet(myBet)} / ${myBet.points_wagered}pt / ${myBet.odds}倍
+            <span class="ml-1 font-bold">${
+              myBet.result === 'hit' ? '✅的中' :
+              myBet.result === 'miss' ? '❌不的中' :
+              myBet.result === 'void' ? '↩️中止により返金済み' : '⏳判定待ち'
+            }</span>
+          </div>`
+        : '';
+
+      const aiBlock = `
+        <div class="text-xs bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 py-2 mb-3 text-indigo-200">
+          🤖 AI予想: <b>${getTeam(game.aiPrediction.winner_team_id).team_name}の勝利</b> /
+          <b>${game.aiPrediction.total_pick.pick === 'over' ? 'オーバー' : 'アンダー'}(${game.aiPrediction.total_pick.line})</b>
+          <p class="text-indigo-300/80 mt-1">${game.aiPrediction.rationale}</p>
+        </div>`;
+
+      const formBlock = bettable
+        ? `<form class="bet-form space-y-2" data-game-id="${game.game_id}">
+             <div class="grid grid-cols-2 gap-2">
+               <label class="pick-option flex flex-col gap-0.5 border border-slate-700 rounded-lg px-2 py-1.5 cursor-pointer text-xs has-[:checked]:border-amber-400 has-[:checked]:bg-amber-500/10 transition-colors">
+                 <input type="radio" class="sr-only" name="pick_${game.game_id}" value="winner:${home.team_id}" required>
+                 <span>${home.team_name}勝利</span><b class="text-amber-400">${game.market.homeOdds}倍</b>
+               </label>
+               <label class="pick-option flex flex-col gap-0.5 border border-slate-700 rounded-lg px-2 py-1.5 cursor-pointer text-xs has-[:checked]:border-amber-400 has-[:checked]:bg-amber-500/10 transition-colors">
+                 <input type="radio" class="sr-only" name="pick_${game.game_id}" value="winner:${away.team_id}" required>
+                 <span>${away.team_name}勝利</span><b class="text-amber-400">${game.market.awayOdds}倍</b>
+               </label>
+               <label class="pick-option flex flex-col gap-0.5 border border-slate-700 rounded-lg px-2 py-1.5 cursor-pointer text-xs has-[:checked]:border-amber-400 has-[:checked]:bg-amber-500/10 transition-colors">
+                 <input type="radio" class="sr-only" name="pick_${game.game_id}" value="total:over" required>
+                 <span>オーバー ${game.market.totalLine}</span><b class="text-amber-400">${game.market.overOdds}倍</b>
+               </label>
+               <label class="pick-option flex flex-col gap-0.5 border border-slate-700 rounded-lg px-2 py-1.5 cursor-pointer text-xs has-[:checked]:border-amber-400 has-[:checked]:bg-amber-500/10 transition-colors">
+                 <input type="radio" class="sr-only" name="pick_${game.game_id}" value="total:under" required>
+                 <span>アンダー ${game.market.totalLine}</span><b class="text-amber-400">${game.market.underOdds}倍</b>
+               </label>
+             </div>
+             <p class="text-[11px] text-slate-500">「勝利チーム」「合計得点」のどちらか1つを選んで予想します(1試合につき1回のみ)。</p>
+             <div class="flex items-center gap-2">
+               <input type="number" min="1" step="1" placeholder="賭けポイント" required
+                      class="wager-input w-28 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-sm" />
+               <button type="submit" class="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm rounded-lg px-4 py-1.5">予想する</button>
+             </div>
+             <p class="bet-error text-rose-400 text-xs hidden"></p>
+           </form>`
+        : (!myBet && game.status === 'scheduled'
+            ? `<p class="text-xs text-slate-500">締切のため予想を受け付けていません。</p>`
+            : '');
+
+      return `
+      <article class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs px-2 py-0.5 rounded-full border ${toneClass}">${status.label}</span>
+          <span class="text-xs text-slate-500">${dateLabel}〜</span>
+        </div>
+        <h3 class="font-bold text-sm mb-3">${home.team_name} <span class="text-slate-500">vs</span> ${away.team_name}</h3>
+        ${resultBlock}
+        ${myBetBlock}
+        ${aiBlock}
+        ${formBlock}
+      </article>`;
+    }
+
+    el('games-list').addEventListener('submit', async (e) => {
+      const form = e.target.closest('.bet-form');
+      if (!form) return;
+      e.preventDefault();
+      const gameId = form.dataset.gameId;
+      const game = gamesCache.get(gameId);
+      const fd = new FormData(form);
+      const pick = fd.get(`pick_${gameId}`);
+      const wagerRaw = form.querySelector('.wager-input').value;
+      const errorEl = form.querySelector('.bet-error');
+      errorEl.classList.add('hidden');
+
+      if (!pick) {
+        errorEl.textContent = '予想を選択してください';
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      const wager = parseInt(wagerRaw, 10);
+      const [type, value] = pick.split(':');
+      const betType = type === 'winner' ? 'winner' : 'total_runs';
+      const betValue = type === 'winner' ? value : { line: game.market.totalLine, pick: value };
+
+      const submitBtn = form.querySelector('button[type=submit]');
+      submitBtn.disabled = true;
+      try {
+        await placeBet(game, betType, betValue, wager);
+      } catch (err) {
+        errorEl.textContent = err.message;
+        errorEl.classList.remove('hidden');
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+
+    /* =======================================================================
+     * 5. 予想(ベット)の作成
+     * ======================================================================= */
+    async function placeBet(game, betType, betValue, wager) {
+      if (!currentUid) throw new Error('認証が完了していません');
+      if (!Number.isInteger(wager) || wager <= 0) throw new Error('賭けポイントは1以上の整数で入力してください');
+      if (!isBettable(game)) throw new Error('この試合の予想は締め切られています');
+      if (myBetsCache.has(game.game_id)) throw new Error('この試合にはすでに予想済みです');
+
+      const odds =
+        betType === 'winner'
+          ? (betValue === game.home_team_id ? game.market.homeOdds : game.market.awayOdds)
+          : (betValue.pick === 'over' ? game.market.overOdds : game.market.underOdds);
+
+      const userRef = doc(db, 'users', currentUid);
+      // bet_idを "uid_gameId" に固定することで、同一ユーザー×同一試合の予想は常に
+      // 同じドキュメントを指すようにし、tx.get()だけで確実に二重予想を防止できるようにしている
+      // (firestore.rules 側でもこのID形式を強制しているため、二重の防御になっている)。
+      const betId = `${currentUid}_${game.game_id}`;
+      const betRef = doc(db, 'bets', betId);
+
+      await runTransaction(db, async (tx) => {
+        const [userSnap, existingBetSnap] = await Promise.all([tx.get(userRef), tx.get(betRef)]);
+        if (existingBetSnap.exists()) throw new Error('この試合にはすでに予想済みです');
+        const userData = userSnap.data();
+        if (userData.total_points < wager) throw new Error('保有ポイントが不足しています');
+
+        tx.set(betRef, {
+          bet_id: betId,
+          user_id: currentUid,
+          game_id: game.game_id,
+          bet_type: betType,
+          bet_value: betValue,
+          points_wagered: wager,
+          odds,
+          result: 'pending',
+          created_at: serverTimestamp(),
+        });
+        tx.update(userRef, {
+          total_points: userData.total_points - wager,
+          prediction_history: arrayUnion(betId),
+        });
+      });
+    }
+
+    /* =======================================================================
+     * 6. 管理者パネル(結果反映デモ)
+     * ======================================================================= */
+    function renderAdminPanel() {
+      const wrap = el('admin-games');
+      if (!isAdminUser) {
+        wrap.innerHTML = '';
+        return;
+      }
+      const targets = [...gamesCache.values()].filter((g) => g.status === 'scheduled');
+      if (targets.length === 0) {
+        wrap.innerHTML = '<p class="text-slate-500">結果反映の対象試合はありません。</p>';
+        return;
+      }
+      wrap.innerHTML = targets
+        .map((g) => {
+          const home = getTeam(g.home_team_id);
+          const away = getTeam(g.away_team_id);
+          return `
+          <div class="admin-game-row flex flex-wrap items-center gap-2 border-t border-slate-800 pt-3" data-game-id="${g.game_id}">
+            <span class="w-full sm:w-40 shrink-0">${home.team_name} vs ${away.team_name}</span>
+            <input type="number" class="score-home w-16 bg-slate-800 border border-slate-700 rounded px-2 py-1" placeholder="${home.team_name}">
+            <span>-</span>
+            <input type="number" class="score-away w-16 bg-slate-800 border border-slate-700 rounded px-2 py-1" placeholder="${away.team_name}">
+            <button type="button" class="btn-settle bg-emerald-600 hover:bg-emerald-500 rounded px-3 py-1 text-xs font-bold">結果確定</button>
+            <button type="button" class="btn-simulate bg-indigo-600 hover:bg-indigo-500 rounded px-3 py-1 text-xs font-bold">自動シミュレーション確定</button>
+            <button type="button" class="btn-cancel bg-slate-700 hover:bg-slate-600 rounded px-3 py-1 text-xs font-bold">中止(返金)</button>
+          </div>`;
+        })
+        .join('');
+    }
+
+    el('admin-games').addEventListener('click', async (e) => {
+      const row = e.target.closest('.admin-game-row');
+      if (!row) return;
+      const gameId = row.dataset.gameId;
+      try {
+        if (e.target.classList.contains('btn-settle')) {
+          const hs = parseInt(row.querySelector('.score-home').value, 10);
+          const as = parseInt(row.querySelector('.score-away').value, 10);
+          if (Number.isNaN(hs) || Number.isNaN(as)) {
+            alert('両チームの得点を入力してください');
+            return;
+          }
+          await adminSettleGame(gameId, hs, as);
+        } else if (e.target.classList.contains('btn-simulate')) {
+          await simulateAndSettle(gameId);
+        } else if (e.target.classList.contains('btn-cancel')) {
+          if (!confirm('この試合を中止し、予想済みのポイントを全額返金しますか?')) return;
+          await adminCancelGame(gameId);
+        }
+      } catch (err) {
+        console.error(err);
+        alert(`エラー: ${err.message}`);
+      }
+    });
+
+    async function simulateAndSettle(gameId) {
+      const game = gamesCache.get(gameId);
+      const home = getTeam(game.home_team_id);
+      const away = getTeam(game.away_team_id);
+      const { homeScore, awayScore } = simulateGameScore(home, away);
+      await adminSettleGame(gameId, homeScore, awayScore);
+    }
+
+    async function adminSettleGame(gameId, homeScore, awayScore) {
+      const game = gamesCache.get(gameId);
+      const winner_team_id =
+        homeScore === awayScore ? null : homeScore > awayScore ? game.home_team_id : game.away_team_id;
+      const result = { home_score: homeScore, away_score: awayScore, winner_team_id };
+
+      await updateDoc(doc(db, 'games', gameId), { status: 'finished', result });
+      const updatedGame = { ...game, result };
+
+      const betsSnap = await getDocs(
+        query(collection(db, 'bets'), where('game_id', '==', gameId), where('result', '==', 'pending'))
+      );
+      for (const betDoc of betsSnap.docs) {
+        const bet = betDoc.data();
+        const outcome = judgeBet(bet, updatedGame);
+        await updateDoc(doc(db, 'bets', betDoc.id), { result: outcome });
+        if (outcome === 'hit') {
+          const payout = Math.round(bet.points_wagered * bet.odds);
+          await creditUserPoints(bet.user_id, payout, `的中 +${payout}pt`);
+        }
+      }
+    }
+
+    async function adminCancelGame(gameId) {
+      await updateDoc(doc(db, 'games', gameId), { status: 'canceled' });
+      const betsSnap = await getDocs(
+        query(collection(db, 'bets'), where('game_id', '==', gameId), where('result', '==', 'pending'))
+      );
+      for (const betDoc of betsSnap.docs) {
+        const bet = betDoc.data();
+        // result の値は本来 pending/hit/miss の3種類だが、試合中止による返金済みを
+        // 表す状態として 'void' を拡張値として使う(bet_typeを将来拡張する設計と同じ考え方)。
+        await updateDoc(doc(db, 'bets', betDoc.id), { result: 'void' });
+        await creditUserPoints(bet.user_id, bet.points_wagered, `試合中止のため返金 +${bet.points_wagered}pt`);
+      }
+    }
+
+    async function creditUserPoints(uid, amount, note) {
+      const userRef = doc(db, 'users', uid);
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(userRef);
+        const data = snap.data();
+        const newTotal = data.total_points + amount;
+        tx.update(userRef, {
+          total_points: newTotal,
+          point_history: arrayUnion({ at: new Date().toISOString(), total_points: newTotal, note }),
+        });
+      });
+    }
+
+    /* =======================================================================
+     * 7. グラフ表示(Chart.js)
+     * ======================================================================= */
+    function renderPointsChart(history) {
+      const sorted = [...history].sort((a, b) => new Date(a.at) - new Date(b.at));
+      const labels = sorted.map((h) =>
+        new Date(h.at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      );
+      const data = sorted.map((h) => h.total_points);
+      if (pointsChart) pointsChart.destroy();
+      pointsChart = new Chart(el('points-chart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: '保有ポイント', data,
+            borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.15)',
+            fill: true, tension: 0.25,
+          }],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: '#cbd5e1' } } },
+          scales: {
+            x: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+            y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+          },
+        },
+      });
+    }
+
+    function renderAccuracy() {
+      if (!currentUid) return;
+      const settled = [...myBetsCache.values()].filter((b) => b.result === 'hit' || b.result === 'miss');
+      let userHits = 0;
+      let aiHits = 0;
+      for (const bet of settled) {
+        const game = gamesCache.get(bet.game_id);
+        if (!game) continue;
+        if (bet.result === 'hit') userHits += 1;
+        if (judgeAiPick(game.aiPrediction, bet.bet_type, game)) aiHits += 1;
+      }
+      const total = settled.length;
+      el('accuracy-summary').textContent =
+        total === 0
+          ? 'まだ判定済みの予想がありません。'
+          : `対象${total}件中 あなた:${userHits}件的中(${Math.round((userHits / total) * 100)}%) / AI:${aiHits}件的中(${Math.round((aiHits / total) * 100)}%)`;
+
+      if (accuracyChart) accuracyChart.destroy();
+      accuracyChart = new Chart(el('accuracy-chart'), {
+        type: 'bar',
+        data: {
+          labels: ['あなた', 'AI'],
+          datasets: [{ label: '的中数', data: [userHits, aiHits], backgroundColor: ['#f59e0b', '#6366f1'] }],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { color: '#94a3b8' }, grid: { display: false } },
+            y: { beginAtZero: true, ticks: { color: '#94a3b8', stepSize: 1 }, grid: { color: '#1e293b' } },
+          },
+        },
+      });
+    }
+  </script>
+</body>
+</html>

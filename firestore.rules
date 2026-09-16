@@ -1,0 +1,81 @@
+rules_version = '2';
+
+// セキュリティルールの設計方針:
+//
+// 1. teams / games は「読み取り専用の公開データ」。チーム成績や試合日程・結果・AI予想を
+//    クライアントから改ざんされないよう、書き込みは管理者(admin custom claim)のみに限定する。
+//    管理者クレームは Firebase Admin SDK からしか付与できない(scripts/set-admin-claim.mjs)
+//    ため、通常のユーザーアカウントが自分でこのクレームを得ることはできない。
+//
+// 2. bets(予想) は「本人としてのみ新規作成できる」。さらに bet_id を必ず
+//    "<uid>_<game_id>" という形式に固定させることで、同一ユーザーが同じ試合に
+//    複数回予想できてしまう不正(二重予想)をルールレベルでも防止している
+//    (アプリ側のトランザクションでも同様のチェックを行っており、二重の防御になっている)。
+//    的中判定(result)の更新は精算処理(admin)のみが行い、ユーザー自身が
+//    「不的中」を「的中」に書き換えるような改ざんを防ぐ。
+//
+// 3. users(ポイント) は「他人のポイントを書き換えられない」ことが最重要。
+//    - 本人は自分のドキュメントについて、total_points と prediction_history の
+//      2フィールドのみを、かつ total_points を「減らす」方向にしか更新できない
+//      (予想時にポイントを賭ける操作にのみ対応する)。
+//    - ポイントを増やす操作(的中時の払い戻し・試合中止時の返金)は admin のみ許可する。
+//
+// 【本フェーズの既知の制約】
+// 現状はクライアント(ブラウザ)から直接Firestoreへ書き込む構成のため、結果反映・精算の
+// 実行者はブラウザ上で admin クレームを持つユーザーに限定している。本来は、この精算処理
+// 自体をCloud Functions等の信頼された実行環境に移し、クライアントは「結果確定リクエスト」
+// を送るだけにする設計がより安全(将来のフェーズでの改善候補)。
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
+    match /teams/{teamId} {
+      // チームデータは現状コード内(js/lottery-core.mjs)で管理している仮データのため、
+      // Firestoreへの書き込みは行わない想定。将来Firestore管理に移す場合に備えてread専用にしておく。
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /games/{gameId} {
+      allow read: if true;
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isOwner(uid);
+      allow update: if isAdmin() || (
+        isOwner(uid) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['total_points', 'prediction_history']) &&
+        request.resource.data.total_points < resource.data.total_points
+      );
+      allow delete: if false;
+    }
+
+    match /bets/{betId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid
+        && betId == request.auth.uid + '_' + request.resource.data.game_id
+        && request.resource.data.result == 'pending';
+      // 的中判定(result)や賭け内容の更新は精算処理(admin)のみ許可し、
+      // ユーザー自身による改ざん(不的中→的中の書き換え等)を防ぐ。
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+  }
+}
