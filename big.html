@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>ベースボールロト(仮)</title>
+<meta name="description" content="予想せず、運試しだけで遊ぶ非予想系の野球くじシミュレーション" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%B0%3C/text%3E%3C/svg%3E" />
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+
+  <header class="sticky top-0 z-20 bg-slate-950/90 backdrop-blur border-b border-slate-800 px-4 py-3">
+    <div class="max-w-5xl mx-auto flex items-center justify-between gap-3">
+      <div>
+        <h1 class="text-lg sm:text-xl font-bold tracking-tight">
+          🎰 ベースボールロト<span class="text-xs align-top text-amber-400 ml-1">(仮)</span>
+        </h1>
+        <p class="text-[11px] text-slate-400">予想不要・運試しだけで遊ぶ、非予想系の野球くじシミュレーション</p>
+        <nav class="flex gap-2 mt-1.5 text-[11px]">
+          <a href="index.html" class="px-2 py-0.5 rounded-full border border-slate-700 text-slate-400 hover:text-slate-200">予想くじモード</a>
+          <a href="big.html" class="px-2 py-0.5 rounded-full border border-amber-500/50 bg-amber-500/10 text-amber-400">ロトくじモード</a>
+        </nav>
+      </div>
+      <div class="text-right text-sm shrink-0">
+        <div class="text-slate-400 text-[11px]">保有ポイント</div>
+        <div id="user-points" class="text-xl font-bold text-amber-400">--- pt</div>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-5xl mx-auto px-4 py-6 space-y-8">
+    <section id="status-banner" class="hidden"></section>
+
+    <section id="draw-section">
+      <h2 class="text-base font-bold mb-3 flex items-center gap-2"><span>🎟️</span>今回のくじ回</h2>
+      <div id="draw-card" class="text-slate-500 text-sm">読み込み中...</div>
+    </section>
+
+    <section>
+      <h2 class="text-base font-bold mb-3 flex items-center gap-2"><span>📜</span>あなたのチケット</h2>
+      <div id="tickets-list" class="space-y-3">
+        <div class="text-slate-500 text-sm">まだチケットを購入していません。</div>
+      </div>
+    </section>
+
+    <section id="admin-section" class="hidden">
+      <details class="bg-slate-900 border border-amber-700/40 rounded-xl">
+        <summary class="cursor-pointer px-4 py-3 text-sm font-bold text-amber-400">
+          🛠 管理者用パネル(くじ回の作成・精算)
+        </summary>
+        <div class="px-4 pb-4 space-y-6 text-sm">
+          <div>
+            <p class="font-bold text-slate-300 mb-2">新しいくじ回を作成</p>
+            <div id="admin-new-draw-games" class="space-y-1"></div>
+            <button id="admin-create-draw" type="button" class="mt-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg px-4 py-1.5">
+              選択した試合でくじ回を作成
+            </button>
+          </div>
+          <div>
+            <p class="font-bold text-slate-300 mb-2">くじ回の精算</p>
+            <div id="admin-draw-list" class="space-y-2"></div>
+          </div>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="max-w-5xl mx-auto px-4 py-8 text-[11px] leading-relaxed text-slate-500 border-t border-slate-800 mt-8 space-y-1">
+    <p>※ 本サービスは実際の金銭を賭けるものではなく、架空ポイントを用いたエンターテインメント(シミュレーションゲーム)です。</p>
+    <p>※ このモードは、勝敗を「予想」せず、システムが自動生成したランダムな組み合わせの的中数で配当が決まる、非予想系(くじ抽選型)の仕組みを再現したデモです。</p>
+    <p>※ 本サービスはNPB(日本野球機構)および各球団による公式サービスではありません。実在の球団名は説明のために使用しています。</p>
+    <p>※ 表示されるチーム成績・試合日程・配当倍率はすべて仮のデモデータです。</p>
+  </footer>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+    import {
+      getAuth, signInAnonymously, onAuthStateChanged,
+    } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+    import {
+      getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot,
+      collection, query, where, getDocs, serverTimestamp,
+      runTransaction, arrayUnion, increment,
+    } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+    import { getTeam } from "./js/lottery-core.mjs";
+    import {
+      DEFAULT_UNIT_PRICE, generateRandomPicks, countMatches,
+      payoutTableFromObject, computePayout,
+      getDrawDeadline, buildDraw,
+    } from "./js/big-lottery-core.mjs";
+
+    // firebaseConfigは index.html と同じFirebaseプロジェクトの値を使ってください
+    // (同じユーザー/ポイント/試合データを共有する前提の設計です)。
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID",
+    };
+
+    const STARTING_POINTS = 1000;
+    const MAX_QTY_PER_PURCHASE = 10;
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const el = (id) => document.getElementById(id);
+
+    function showBanner(msg, type = 'info') {
+      const b = el('status-banner');
+      b.textContent = msg;
+      b.classList.remove('hidden');
+      b.className = `text-sm rounded-lg px-3 py-2 border ${
+        type === 'error'
+          ? 'bg-rose-500/10 border-rose-500/40 text-rose-300'
+          : 'bg-slate-800 border-slate-700 text-slate-300'
+      }`;
+    }
+
+    let currentUid = null;
+    let isAdminUser = false;
+    const gamesCache = new Map(); // game_id -> game doc data
+    const drawsCache = new Map(); // draw_id -> draw doc data
+    const myTicketsCache = new Map(); // ticket doc id -> ticket doc data
+
+    onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        signInAnonymously(auth).catch((err) => {
+          console.error(err);
+          showBanner(
+            `匿名ログインに失敗しました(${err.code}）。firebaseConfigをご自身のFirebaseプロジェクトの値に置き換えてください。`,
+            'error'
+          );
+        });
+        return;
+      }
+      currentUid = user.uid;
+      const tokenResult = await user.getIdTokenResult();
+      isAdminUser = tokenResult.claims.admin === true;
+      el('admin-section').classList.toggle('hidden', !isAdminUser);
+
+      try {
+        await ensureUserDoc(currentUid);
+        subscribeGames();
+        subscribeDraws();
+        subscribeMyTickets();
+        subscribeUserDoc();
+      } catch (err) {
+        console.error(err);
+        showBanner(`初期化に失敗しました: ${err.message}`, 'error');
+      }
+    });
+
+    async function ensureUserDoc(uid) {
+      const ref = doc(db, 'users', uid);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) {
+        await setDoc(ref, {
+          display_name: `ゲスト-${uid.slice(0, 6)}`,
+          total_points: STARTING_POINTS,
+          prediction_history: [],
+          point_history: [
+            { at: new Date().toISOString(), total_points: STARTING_POINTS, note: '初期付与' },
+          ],
+        });
+      }
+    }
+
+    function subscribeGames() {
+      onSnapshot(collection(db, 'games'), (snap) => {
+        gamesCache.clear();
+        snap.forEach((d) => gamesCache.set(d.id, d.data()));
+        renderDraw();
+        renderAdminNewDrawGames();
+      }, (err) => showBanner(`試合データの取得に失敗しました: ${err.message}`, 'error'));
+    }
+
+    function subscribeDraws() {
+      onSnapshot(collection(db, 'draws'), (snap) => {
+        drawsCache.clear();
+        snap.forEach((d) => drawsCache.set(d.id, { draw_id: d.id, ...d.data() }));
+        renderDraw();
+        renderAdminDrawList();
+      }, (err) => showBanner(`くじ回データの取得に失敗しました: ${err.message}`, 'error'));
+    }
+
+    function subscribeMyTickets() {
+      const qy = query(collection(db, 'tickets'), where('user_id', '==', currentUid));
+      onSnapshot(qy, (snap) => {
+        myTicketsCache.clear();
+        snap.forEach((d) => myTicketsCache.set(d.id, { id: d.id, ...d.data() }));
+        renderDraw();
+        renderTickets();
+      }, (err) => showBanner(`チケット履歴の取得に失敗しました: ${err.message}`, 'error'));
+    }
+
+    function subscribeUserDoc() {
+      onSnapshot(doc(db, 'users', currentUid), (snap) => {
+        const data = snap.data();
+        if (!data) return;
+        el('user-points').textContent = `${data.total_points.toLocaleString()} pt`;
+      });
+    }
+
+    function getCurrentDraw() {
+      let latest = null;
+      for (const draw of drawsCache.values()) {
+        const createdMs = draw.created_at?.toMillis ? draw.created_at.toMillis() : 0;
+        const latestMs = latest?.created_at?.toMillis ? latest.created_at.toMillis() : -1;
+        if (!latest || createdMs >= latestMs) latest = draw;
+      }
+      return latest;
+    }
+
+    function isDrawOpen(draw) {
+      return draw.status === 'open' && Date.now() < new Date(draw.closes_at).getTime();
+    }
+
+    function shareOnX(text) {
+      const url = new URL('https://twitter.com/intent/tweet');
+      url.searchParams.set('text', text);
+      url.searchParams.set('url', location.href);
+      window.open(url.toString(), '_blank', 'noopener,noreferrer');
+    }
+
+    /* =======================================================================
+     * くじ回カードの表示
+     * ======================================================================= */
+    function renderDraw() {
+      const wrap = el('draw-card');
+      const draw = getCurrentDraw();
+      if (!draw) {
+        wrap.innerHTML = `<div class="text-slate-500 text-sm bg-slate-900 border border-slate-800 rounded-xl p-4">まだくじ回がありません。管理者パネルから作成してください。</div>`;
+        return;
+      }
+
+      const open = isDrawOpen(draw);
+      const payoutTable = payoutTableFromObject(draw.payout_table);
+      const n = draw.game_ids.length;
+      const jackpotMultiplier = payoutTable.get(n) || 0;
+      const secondMultiplier = payoutTable.get(n - 1) || 0;
+      const closesLabel = new Date(draw.closes_at).toLocaleString('ja-JP', {
+        month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      });
+      const participantCount = (draw.participant_uids || []).length;
+      const ticketCount = draw.ticket_count || 0;
+
+      const gamesRows = draw.game_ids
+        .map((gameId) => {
+          const g = gamesCache.get(gameId);
+          if (!g) return '';
+          const home = getTeam(g.home_team_id);
+          const away = getTeam(g.away_team_id);
+          return `<li class="flex items-center justify-between text-xs bg-slate-800/60 rounded-lg px-3 py-2">
+            <span>${home.team_name} <span class="text-slate-500">vs</span> ${away.team_name}</span>
+            <span class="text-slate-500">${new Date(g.game_date).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}〜</span>
+          </li>`;
+        })
+        .join('');
+
+      const statusBadge = draw.status === 'settled'
+        ? `<span class="text-xs px-2 py-0.5 rounded-full border bg-emerald-500/15 text-emerald-400 border-emerald-500/30">精算済み</span>`
+        : draw.status === 'canceled'
+        ? `<span class="text-xs px-2 py-0.5 rounded-full border bg-slate-700/30 text-slate-400 border-slate-600/40">中止(返金済み)</span>`
+        : open
+        ? `<span class="text-xs px-2 py-0.5 rounded-full border bg-amber-500/15 text-amber-400 border-amber-500/30">受付中</span>`
+        : `<span class="text-xs px-2 py-0.5 rounded-full border bg-slate-700/30 text-slate-400 border-slate-600/40">締切(結果待ち)</span>`;
+
+      const purchaseBlock = open
+        ? `<form id="buy-form" class="space-y-2 mt-3">
+             <div class="flex items-center gap-2">
+               <label class="text-xs text-slate-400">購入口数</label>
+               <input id="qty-input" type="number" min="1" max="${MAX_QTY_PER_PURCHASE}" step="1" value="1"
+                      class="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-sm" />
+               <span class="text-xs text-slate-400">× ${draw.unit_price}pt = <span id="buy-total" class="text-amber-400 font-bold">${draw.unit_price}pt</span></span>
+             </div>
+             <button type="submit" class="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm rounded-lg px-4 py-1.5">🎲 ランダムで購入する</button>
+             <p class="bet-error text-rose-400 text-xs hidden"></p>
+           </form>`
+        : '';
+
+      wrap.innerHTML = `
+        <article class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <div class="flex items-center justify-between mb-2">
+            ${statusBadge}
+            <span class="text-xs text-slate-500">${closesLabel} 締切</span>
+          </div>
+          <ul class="space-y-1.5 mb-3">${gamesRows}</ul>
+          <div class="grid grid-cols-2 gap-2 text-xs mb-3">
+            <div class="bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 py-2 text-indigo-200">
+              全${n}試合的中(ジャックポット)<br><b class="text-lg">${jackpotMultiplier}倍</b>
+            </div>
+            <div class="bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 py-2 text-indigo-200">
+              ${n - 1}試合的中(1つ惜しい)<br><b class="text-lg">${secondMultiplier}倍</b>
+            </div>
+          </div>
+          <p class="text-[11px] text-slate-500 mb-2">1口 ${draw.unit_price}pt。予想は不要です — 購入するとシステムが全試合の勝敗をランダムに自動生成します。</p>
+          <div class="text-xs text-slate-400 mb-2">🔥 今回の参加人数 ${participantCount}人 / 販売口数 ${ticketCount}口</div>
+          ${purchaseBlock}
+        </article>`;
+
+      if (open) {
+        const qtyInput = el('qty-input');
+        const totalLabel = el('buy-total');
+        qtyInput.addEventListener('input', () => {
+          const qty = Math.max(1, Math.min(MAX_QTY_PER_PURCHASE, parseInt(qtyInput.value, 10) || 1));
+          totalLabel.textContent = `${draw.unit_price * qty}pt`;
+        });
+        el('buy-form').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const qty = Math.max(1, Math.min(MAX_QTY_PER_PURCHASE, parseInt(qtyInput.value, 10) || 1));
+          const errorEl = document.querySelector('#buy-form .bet-error');
+          errorEl.classList.add('hidden');
+          const submitBtn = e.target.querySelector('button[type=submit]');
+          submitBtn.disabled = true;
+          try {
+            await buyTickets(draw, qty);
+            shareOnX(`🎰ベースボールロトで${qty}口購入しました!今回は全${n}試合的中なるか!?`);
+          } catch (err) {
+            errorEl.textContent = err.message;
+            errorEl.classList.remove('hidden');
+          } finally {
+            submitBtn.disabled = false;
+          }
+        });
+      }
+    }
+
+    /* =======================================================================
+     * チケット購入
+     * ======================================================================= */
+    async function buyTickets(draw, quantity) {
+      if (!currentUid) throw new Error('認証が完了していません');
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > MAX_QTY_PER_PURCHASE) {
+        throw new Error(`購入口数は1〜${MAX_QTY_PER_PURCHASE}の範囲で指定してください`);
+      }
+      if (!isDrawOpen(draw)) throw new Error('このくじ回は受付を終了しています');
+
+      const totalCost = draw.unit_price * quantity;
+      const userRef = doc(db, 'users', currentUid);
+      const drawRef = doc(db, 'draws', draw.draw_id);
+      const ticketRefs = Array.from({ length: quantity }, () => doc(collection(db, 'tickets')));
+
+      await runTransaction(db, async (tx) => {
+        const userSnap = await tx.get(userRef);
+        const userData = userSnap.data();
+        if (userData.total_points < totalCost) throw new Error('保有ポイントが不足しています');
+
+        for (const ticketRef of ticketRefs) {
+          const picks = generateRandomPicks(draw.game_ids);
+          tx.set(ticketRef, {
+            ticket_id: ticketRef.id,
+            user_id: currentUid,
+            draw_id: draw.draw_id,
+            picks,
+            unit_price: draw.unit_price,
+            result: 'pending',
+            matched_count: null,
+            payout: null,
+            purchased_at: serverTimestamp(),
+          });
+        }
+        tx.update(userRef, {
+          total_points: userData.total_points - totalCost,
+          prediction_history: arrayUnion(...ticketRefs.map((r) => r.id)),
+        });
+        tx.update(drawRef, {
+          ticket_count: increment(quantity),
+          participant_uids: arrayUnion(currentUid),
+        });
+      });
+    }
+
+    /* =======================================================================
+     * マイチケット一覧
+     * ======================================================================= */
+    function renderTickets() {
+      const wrap = el('tickets-list');
+      const tickets = [...myTicketsCache.values()].sort((a, b) => {
+        const am = a.purchased_at?.toMillis ? a.purchased_at.toMillis() : 0;
+        const bm = b.purchased_at?.toMillis ? b.purchased_at.toMillis() : 0;
+        return bm - am;
+      });
+      if (tickets.length === 0) {
+        wrap.innerHTML = `<div class="text-slate-500 text-sm">まだチケットを購入していません。</div>`;
+        return;
+      }
+      wrap.innerHTML = tickets.map((t) => renderTicketCard(t)).join('');
+    }
+
+    function renderTicketCard(ticket) {
+      const draw = drawsCache.get(ticket.draw_id);
+      const gameIds = draw ? draw.game_ids : Object.keys(ticket.picks);
+      const chips = gameIds
+        .map((gameId) => {
+          const g = gamesCache.get(gameId);
+          if (!g) return '';
+          const pick = ticket.picks[gameId];
+          const pickedTeam = pick === 'home' ? getTeam(g.home_team_id) : getTeam(g.away_team_id);
+          let toneClass = 'border-slate-700 text-slate-300';
+          if (ticket.result === 'settled' && g.result?.winner_team_id) {
+            const actualSide = g.result.winner_team_id === g.home_team_id ? 'home' : 'away';
+            toneClass = pick === actualSide
+              ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+              : 'border-rose-500/50 bg-rose-500/10 text-rose-300';
+          }
+          return `<span class="text-[11px] border rounded-full px-2 py-0.5 ${toneClass}">${pickedTeam.team_name}</span>`;
+        })
+        .join(' ');
+
+      const resultLabel = ticket.result === 'settled'
+        ? (ticket.payout > 0
+            ? `<span class="text-emerald-300 font-bold">🎉 ${ticket.matched_count}試合的中 / +${ticket.payout}pt</span>`
+            : `<span class="text-slate-400">${ticket.matched_count}試合的中 / はずれ</span>`)
+        : ticket.result === 'void'
+        ? `<span class="text-slate-400">↩️ くじ回中止のため返金済み</span>`
+        : `<span class="text-slate-400">⏳ 結果待ち</span>`;
+
+      const shareBtn = ticket.result === 'settled' && ticket.payout > 0
+        ? `<button type="button" class="share-btn text-[11px] text-indigo-300 border border-indigo-500/40 rounded-full px-2 py-0.5" data-matched="${ticket.matched_count}" data-payout="${ticket.payout}">𝕏 結果をシェア</button>`
+        : '';
+
+      return `
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3">
+          <div class="flex flex-wrap gap-1.5 mb-2">${chips}</div>
+          <div class="flex items-center justify-between text-xs">
+            <span>${resultLabel}</span>
+            ${shareBtn}
+          </div>
+        </div>`;
+    }
+
+    el('tickets-list').addEventListener('click', (e) => {
+      const btn = e.target.closest('.share-btn');
+      if (!btn) return;
+      shareOnX(`🎉ベースボールロトで${btn.dataset.matched}試合的中!${btn.dataset.payout}pt獲得しました🎰`);
+    });
+
+    /* =======================================================================
+     * 管理者パネル: くじ回の作成
+     * ======================================================================= */
+    function renderAdminNewDrawGames() {
+      if (!isAdminUser) return;
+      const wrap = el('admin-new-draw-games');
+      const scheduled = [...gamesCache.values()].filter((g) => g.status === 'scheduled');
+      if (scheduled.length === 0) {
+        wrap.innerHTML = '<p class="text-slate-500 text-xs">受付中の試合がありません。</p>';
+        return;
+      }
+      wrap.innerHTML = scheduled
+        .map((g) => {
+          const home = getTeam(g.home_team_id);
+          const away = getTeam(g.away_team_id);
+          return `<label class="flex items-center gap-2 text-xs">
+            <input type="checkbox" class="draw-game-checkbox" value="${g.game_id}" checked>
+            ${home.team_name} vs ${away.team_name}
+          </label>`;
+        })
+        .join('');
+    }
+
+    el('admin-create-draw').addEventListener('click', async () => {
+      const checked = [...document.querySelectorAll('.draw-game-checkbox:checked')].map((c) => c.value);
+      if (checked.length < 2) {
+        alert('くじ回には2試合以上を含めてください');
+        return;
+      }
+      try {
+        const drawData = buildDraw(checked, DEFAULT_UNIT_PRICE);
+        const closesAtMs = getDrawDeadline(checked, gamesCache);
+        const drawRef = doc(collection(db, 'draws'));
+        await setDoc(drawRef, {
+          ...drawData,
+          draw_id: drawRef.id,
+          status: 'open',
+          closes_at: new Date(closesAtMs).toISOString(),
+          ticket_count: 0,
+          participant_uids: [],
+          created_at: serverTimestamp(),
+        });
+        alert('くじ回を作成しました');
+      } catch (err) {
+        console.error(err);
+        alert(`エラー: ${err.message}`);
+      }
+    });
+
+    /* =======================================================================
+     * 管理者パネル: くじ回の精算
+     * ======================================================================= */
+    function renderAdminDrawList() {
+      if (!isAdminUser) return;
+      const wrap = el('admin-draw-list');
+      const targets = [...drawsCache.values()]
+        .filter((d) => d.status === 'open' || d.status === 'closed')
+        .sort((a, b) => new Date(b.closes_at) - new Date(a.closes_at));
+      if (targets.length === 0) {
+        wrap.innerHTML = '<p class="text-slate-500 text-xs">精算対象のくじ回はありません。</p>';
+        return;
+      }
+      wrap.innerHTML = targets
+        .map((d) => {
+          const allFinished = d.game_ids.every((id) => gamesCache.get(id)?.status === 'finished');
+          const anyCanceled = d.game_ids.some((id) => gamesCache.get(id)?.status === 'canceled');
+          const readyLabel = anyCanceled ? '一部試合が中止(返金精算可能)' : allFinished ? '全試合確定済み(精算可能)' : 'まだ結果待ちの試合があります';
+          return `<div class="admin-draw-row flex flex-wrap items-center gap-2 border-t border-slate-800 pt-2" data-draw-id="${d.draw_id}">
+            <span class="text-xs w-full sm:w-auto">${d.game_ids.length}試合 / ${readyLabel}</span>
+            <button type="button" class="btn-settle-draw bg-emerald-600 hover:bg-emerald-500 rounded px-3 py-1 text-xs font-bold" ${!allFinished && !anyCanceled ? 'disabled' : ''}>精算する</button>
+          </div>`;
+        })
+        .join('');
+    }
+
+    el('admin-draw-list').addEventListener('click', async (e) => {
+      const row = e.target.closest('.admin-draw-row');
+      if (!row || !e.target.classList.contains('btn-settle-draw')) return;
+      try {
+        await settleDraw(row.dataset.drawId);
+      } catch (err) {
+        console.error(err);
+        alert(`エラー: ${err.message}`);
+      }
+    });
+
+    async function settleDraw(drawId) {
+      const draw = drawsCache.get(drawId);
+      if (!draw) return;
+      const anyCanceled = draw.game_ids.some((id) => gamesCache.get(id)?.status === 'canceled');
+      const allFinished = draw.game_ids.every((id) => gamesCache.get(id)?.status === 'finished');
+
+      const ticketsSnap = await getDocs(
+        query(collection(db, 'tickets'), where('draw_id', '==', drawId), where('result', '==', 'pending'))
+      );
+
+      if (anyCanceled) {
+        for (const ticketDoc of ticketsSnap.docs) {
+          const ticket = ticketDoc.data();
+          await updateDoc(doc(db, 'tickets', ticketDoc.id), { result: 'void', matched_count: null, payout: null });
+          await creditUserPoints(ticket.user_id, ticket.unit_price, `くじ回中止のため返金 +${ticket.unit_price}pt`);
+        }
+        await updateDoc(doc(db, 'draws', drawId), { status: 'canceled' });
+        return;
+      }
+
+      if (!allFinished) {
+        alert('まだ結果が確定していない試合があります');
+        return;
+      }
+
+      const gamesById = new Map(draw.game_ids.map((id) => [id, gamesCache.get(id)]));
+      const payoutTable = payoutTableFromObject(draw.payout_table);
+      for (const ticketDoc of ticketsSnap.docs) {
+        const ticket = ticketDoc.data();
+        const { matched } = countMatches(ticket.picks, gamesById);
+        const payout = computePayout(matched, payoutTable, ticket.unit_price);
+        await updateDoc(doc(db, 'tickets', ticketDoc.id), { result: 'settled', matched_count: matched, payout });
+        if (payout > 0) {
+          await creditUserPoints(ticket.user_id, payout, `ベースボールロト的中 +${payout}pt`);
+        }
+      }
+      await updateDoc(doc(db, 'draws', drawId), { status: 'settled' });
+    }
+
+    async function creditUserPoints(uid, amount, note) {
+      const userRef = doc(db, 'users', uid);
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(userRef);
+        const data = snap.data();
+        const newTotal = data.total_points + amount;
+        tx.update(userRef, {
+          total_points: newTotal,
+          point_history: arrayUnion({ at: new Date().toISOString(), total_points: newTotal, note }),
+        });
+      });
+    }
+  </script>
+</body>
+</html>

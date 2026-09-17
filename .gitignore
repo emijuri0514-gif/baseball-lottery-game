@@ -1,4 +1,6 @@
 node_modules/
 serviceAccountKey.json
+.firebaserc
+.firebase/
 .DS_Store
 *.log

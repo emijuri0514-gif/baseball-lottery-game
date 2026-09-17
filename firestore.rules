@@ -20,6 +20,15 @@ rules_version = '2';
 //      (予想時にポイントを賭ける操作にのみ対応する)。
 //    - ポイントを増やす操作(的中時の払い戻し・試合中止時の返金)は admin のみ許可する。
 //
+// 4. draws / tickets(非予想系くじ)は bets と似た考え方だが、1ユーザーが同じくじ回で
+//    複数口購入できる点が異なるため、ticket_id は固定フォーマットにしていない
+//    (代わりに result=='pending' でのみ作成できることを条件にし、的中判定済みの
+//    チケットを新規作成扱いで書き込めないようにしている)。
+//    draws ドキュメントは admin のみ作成・全体更新できるが、購入時に増える
+//    ticket_count / participant_uids の2フィールドだけは、一般ユーザーでも
+//    「増やす方向」にのみ更新できる(抽選対象試合や配当テーブルなど、他のフィールドは
+//    admin以外書き換えられない)。
+//
 // 【本フェーズの既知の制約】
 // 現状はクライアント(ブラウザ)から直接Firestoreへ書き込む構成のため、結果反映・精算の
 // 実行者はブラウザ上で admin クレームを持つユーザーに限定している。本来は、この精算処理
@@ -74,6 +83,31 @@ service cloud.firestore {
         && request.resource.data.result == 'pending';
       // 的中判定(result)や賭け内容の更新は精算処理(admin)のみ許可し、
       // ユーザー自身による改ざん(不的中→的中の書き換え等)を防ぐ。
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /draws/{drawId} {
+      allow read: if true;
+      allow create: if isAdmin();
+      // admin は全フィールドを更新できる(くじ回の精算・取消など)。
+      // 一般ユーザーは、チケット購入に伴う ticket_count / participant_uids の
+      // 加算のみ許可し、対象試合・配当テーブル・ステータスなどは書き換えさせない。
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ticket_count', 'participant_uids']) &&
+        request.resource.data.ticket_count is int &&
+        request.resource.data.ticket_count >= resource.data.ticket_count
+      );
+      allow delete: if false;
+    }
+
+    match /tickets/{ticketId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.result == 'pending';
+      // 的中判定(result/matched_count/payout)の更新は精算処理(admin)のみ許可する。
       allow update: if isAdmin();
       allow delete: if false;
     }
