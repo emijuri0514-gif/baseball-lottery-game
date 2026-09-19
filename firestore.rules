@@ -67,9 +67,12 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if isOwner(uid) || isAdmin();
       allow create: if isOwner(uid);
+      // unlocks は交換ショップ(shop.html)での実績解放用。予想/チケット購入と同じく、
+      // 本人による更新は「total_pointsを減らす」操作にしか使えないようにしてあるため、
+      // ポイントを払わずに解放を得ることはできない。
       allow update: if isAdmin() || (
         isOwner(uid) &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['total_points', 'prediction_history']) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['total_points', 'prediction_history', 'unlocks']) &&
         request.resource.data.total_points < resource.data.total_points
       );
       allow delete: if false;

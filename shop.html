@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>交換ショップ(仮)</title>
+<meta name="description" content="貯めたポイントをサイト内の機能解放と交換できるショップ" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%81%3C/text%3E%3C/svg%3E" />
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+
+  <header class="sticky top-0 z-20 bg-slate-950/90 backdrop-blur border-b border-slate-800 px-4 py-3">
+    <div class="max-w-5xl mx-auto flex items-center justify-between gap-3">
+      <div>
+        <h1 class="text-lg sm:text-xl font-bold tracking-tight">
+          🎁 交換ショップ<span class="text-xs align-top text-amber-400 ml-1">(仮)</span>
+        </h1>
+        <p class="text-[11px] text-slate-400">貯めたポイントは換金せず、サイト内の機能解放と交換できます</p>
+        <nav class="flex gap-2 mt-1.5 text-[11px]">
+          <a href="index.html" class="px-2 py-0.5 rounded-full border border-slate-700 text-slate-400 hover:text-slate-200">予想くじモード</a>
+          <a href="big.html" class="px-2 py-0.5 rounded-full border border-slate-700 text-slate-400 hover:text-slate-200">ロトくじモード</a>
+          <a href="shop.html" class="px-2 py-0.5 rounded-full border border-amber-500/50 bg-amber-500/10 text-amber-400">交換ショップ</a>
+        </nav>
+      </div>
+      <div class="text-right text-sm shrink-0">
+        <div class="text-slate-400 text-[11px]">保有ポイント</div>
+        <div id="user-points" class="text-xl font-bold text-amber-400">--- pt</div>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-5xl mx-auto px-4 py-6 space-y-8">
+    <section id="status-banner" class="hidden"></section>
+
+    <section>
+      <h2 class="text-base font-bold mb-3 flex items-center gap-2"><span>🎁</span>交換できるもの</h2>
+      <p class="text-xs text-slate-500 mb-4">
+        ここでの交換は一度きりの「実績解放」です。当選確率やオッズには一切影響せず、新しい遊び方が使えるようになるだけです。
+      </p>
+      <div id="shop-list" class="grid gap-4 sm:grid-cols-2">
+        <div class="text-slate-500 text-sm">読み込み中...</div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="max-w-5xl mx-auto px-4 py-8 text-[11px] leading-relaxed text-slate-500 border-t border-slate-800 mt-8 space-y-1">
+    <p>※ 本サービスは実際の金銭を賭けるものではなく、架空ポイントを用いたエンターテインメント(シミュレーションゲーム)です。ポイントの換金は一切行っていません。</p>
+    <p>※ ここでの交換は、当選確率や配当を有利にするものではなく、新しい遊び方(コンテンツ)へのアクセス権を得るものです。</p>
+    <p>※ 本サービスはNPB(日本野球機構)および各球団による公式サービスではありません。</p>
+  </footer>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+    import {
+      getAuth, signInAnonymously, onAuthStateChanged,
+    } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+    import {
+      getFirestore, doc, getDoc, setDoc, onSnapshot, runTransaction, arrayUnion,
+    } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+    import { SHOP_ITEMS, isUnlocked } from "./js/shop-items.mjs";
+
+    // firebaseConfigは index.html / big.html と同じFirebaseプロジェクトの値を使ってください
+    // (同じユーザー/ポイントデータを共有する前提の設計です)。
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID",
+    };
+
+    const STARTING_POINTS = 1000;
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const el = (id) => document.getElementById(id);
+
+    function showBanner(msg, type = 'info') {
+      const b = el('status-banner');
+      b.textContent = msg;
+      b.classList.remove('hidden');
+      b.className = `text-sm rounded-lg px-3 py-2 border ${
+        type === 'error'
+          ? 'bg-rose-500/10 border-rose-500/40 text-rose-300'
+          : 'bg-slate-800 border-slate-700 text-slate-300'
+      }`;
+    }
+
+    let currentUid = null;
+    let currentUserData = null;
+
+    onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        signInAnonymously(auth).catch((err) => {
+          console.error(err);
+          showBanner(
+            `匿名ログインに失敗しました(${err.code}）。firebaseConfigをご自身のFirebaseプロジェクトの値に置き換えてください。`,
+            'error'
+          );
+        });
+        return;
+      }
+      currentUid = user.uid;
+      try {
+        await ensureUserDoc(currentUid);
+        subscribeUserDoc();
+      } catch (err) {
+        console.error(err);
+        showBanner(`初期化に失敗しました: ${err.message}`, 'error');
+      }
+    });
+
+    async function ensureUserDoc(uid) {
+      const ref = doc(db, 'users', uid);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) {
+        await setDoc(ref, {
+          display_name: `ゲスト-${uid.slice(0, 6)}`,
+          total_points: STARTING_POINTS,
+          prediction_history: [],
+          point_history: [
+            { at: new Date().toISOString(), total_points: STARTING_POINTS, note: '初期付与' },
+          ],
+          unlocks: [],
+        });
+      }
+    }
+
+    function subscribeUserDoc() {
+      onSnapshot(doc(db, 'users', currentUid), (snap) => {
+        currentUserData = snap.data();
+        if (!currentUserData) return;
+        el('user-points').textContent = `${currentUserData.total_points.toLocaleString()} pt`;
+        renderShop();
+      }, (err) => showBanner(`ユーザーデータの取得に失敗しました: ${err.message}`, 'error'));
+    }
+
+    /* =======================================================================
+     * ショップ表示
+     * ======================================================================= */
+    function renderShop() {
+      const wrap = el('shop-list');
+      wrap.innerHTML = SHOP_ITEMS.map((item) => renderItemCard(item)).join('');
+    }
+
+    function renderItemCard(item) {
+      const owned = isUnlocked(currentUserData?.unlocks, item.id);
+      const canAfford = (currentUserData?.total_points || 0) >= item.cost;
+
+      let buttonHtml;
+      if (!item.available) {
+        buttonHtml = `<button type="button" disabled class="w-full bg-slate-800 text-slate-500 text-sm font-bold rounded-lg px-4 py-2 cursor-not-allowed">準備中</button>`;
+      } else if (owned) {
+        buttonHtml = `<button type="button" disabled class="w-full bg-emerald-500/20 text-emerald-300 text-sm font-bold rounded-lg px-4 py-2 cursor-not-allowed">✓ 交換済み</button>`;
+      } else if (!canAfford) {
+        buttonHtml = `<button type="button" disabled class="w-full bg-slate-800 text-slate-500 text-sm font-bold rounded-lg px-4 py-2 cursor-not-allowed">ポイント不足</button>`;
+      } else {
+        buttonHtml = `<button type="button" class="buy-btn w-full bg-amber-500 hover:bg-amber-400 text-slate-950 text-sm font-bold rounded-lg px-4 py-2" data-item-id="${item.id}">交換する</button>`;
+      }
+
+      return `
+        <article class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-bold text-sm">${item.name}</h3>
+            <span class="text-xs px-2 py-0.5 rounded-full border ${item.available ? 'border-amber-500/40 text-amber-400 bg-amber-500/10' : 'border-slate-700 text-slate-500'}">${item.cost.toLocaleString()}pt</span>
+          </div>
+          <p class="text-xs text-slate-400 mb-4 flex-1">${item.description}</p>
+          <p class="item-error text-rose-400 text-xs hidden mb-2" data-item-id="${item.id}"></p>
+          ${buttonHtml}
+        </article>`;
+    }
+
+    el('shop-list').addEventListener('click', async (e) => {
+      const btn = e.target.closest('.buy-btn');
+      if (!btn) return;
+      const itemId = btn.dataset.itemId;
+      btn.disabled = true;
+      try {
+        await purchaseItem(itemId);
+      } catch (err) {
+        const errorEl = document.querySelector(`.item-error[data-item-id="${itemId}"]`);
+        if (errorEl) {
+          errorEl.textContent = err.message;
+          errorEl.classList.remove('hidden');
+        }
+        btn.disabled = false;
+      }
+    });
+
+    /* =======================================================================
+     * 交換処理
+     * ======================================================================= */
+    async function purchaseItem(itemId) {
+      if (!currentUid) throw new Error('認証が完了していません');
+      const item = SHOP_ITEMS.find((i) => i.id === itemId);
+      if (!item || !item.available) throw new Error('この商品は現在交換できません');
+
+      const userRef = doc(db, 'users', currentUid);
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(userRef);
+        const data = snap.data();
+        if (isUnlocked(data.unlocks, itemId)) throw new Error('すでに交換済みです');
+        if (data.total_points < item.cost) throw new Error('保有ポイントが不足しています');
+
+        // total_points/prediction_historyの減算と同じ設計方針にそろえるため、
+        // ここでもpoint_history(グラフ用の履歴)には書き込まない
+        // (増加イベントのみadmin経由の精算処理で記録する、という既存の方針を踏襲)。
+        tx.update(userRef, {
+          total_points: data.total_points - item.cost,
+          unlocks: arrayUnion(itemId),
+        });
+      });
+    }
+  </script>
+</body>
+</html>
