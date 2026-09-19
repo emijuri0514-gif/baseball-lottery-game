@@ -5,8 +5,16 @@
 // 組み合わせを発行し、実際の結果とどれだけ一致したかで配当が決まる、純粋な
 // 抽選型のくじ)を指す。js/lottery-core.mjs の「予想して当てる」モードとは
 // 別のゲーム性として、このファイルに分離して実装している。
+//
+// 配当は「パリミュチュエル方式」(実際のtoto BIGと同じ)にしている。あらかじめ
+// 固定された倍率で配当するのではなく、購入総額から確保したプールを、その等級の
+// 実際の当選口数で山分けする。そのため、同じ的中数でも当選者が少ない回ほど
+// 1口あたりの配当は増え、多い回ほど減る(=結果が確定するまで金額はわからない)。
+// 販売中は、理論上の的中確率から算出した「目安配当」を参考情報として表示できる。
 
 export const DEFAULT_UNIT_PRICE = 100; // 1口あたりの価格(pt)。totoBIGの100円単位を模している。
+export const DEFAULT_PAYOUT_RATE = 0.85; // 還元率。購入総額のうちこの割合を配当プールに充てる。
+export const DEFAULT_JACKPOT_SHARE = 0.7; // 配当プールのうち全試合的中(1等)に配分する割合。残りは1つ外れ(2等)に配分する。
 
 // 対象試合それぞれについて、ホーム/アウェイのどちらが勝つかをランダムに1つ選ぶ。
 // 非予想系である以上、ユーザーの技術や球団成績の知識で結果を左右させないよう、
@@ -40,37 +48,42 @@ function factorial(x) {
   return r;
 }
 
-// 二項分布 P(X=k), p=0.5 (五分五分の予想をn試合分的中させる確率)。
-function probExactMatches(n, k) {
+// 二項分布 P(X=k), p=0.5 (五分五分の乱数でn試合中k試合的中する理論上の確率)。
+export function probExactMatches(n, k) {
   const comb = factorial(n) / (factorial(k) * factorial(n - k));
   return comb * (0.5 ** n);
 }
 
-// 配当テーブル: 全試合的中(ジャックポット)と、1試合だけ外れ(2等)のみ配当を出し、
-// それ以外ははずれ(0倍)とする。倍率は calcOdds と同じ考え方
-// (odds = (1 / 的中確率) × 還元率)で公正な期待値から逆算し、上限でキャップする。
-export function buildPayoutTable(n, { payoutRate = 0.85, maxMultiplier = 5000 } = {}) {
-  const fairMultiplier = (k) => Math.min(maxMultiplier, Math.round((1 / probExactMatches(n, k)) * payoutRate));
-
-  const table = new Map();
-  for (let k = 0; k <= n; k += 1) table.set(k, 0);
-  if (n >= 1) table.set(n, fairMultiplier(n));
-  if (n >= 2) table.set(n - 1, fairMultiplier(n - 1));
-  return table;
+// 配当が出るのは「全試合的中(1等)」と「1試合だけ外れ(2等)」の2クラスのみ。
+// それ以外ははずれ(配分なし)とする。
+function tierShare(n, k, jackpotShare) {
+  if (k === n) return jackpotShare;
+  if (k === n - 1) return 1 - jackpotShare;
+  return 0;
 }
 
-// FirestoreはMap型を保存できないため、プレーンオブジェクトと相互変換する。
-export function payoutTableToObject(table) {
-  return Object.fromEntries([...table.entries()].map(([k, v]) => [String(k), v]));
+// 目安配当(1口あたり, まだ結果が出る前の参考値)。
+// 実際のtoto BIGの「参考配当金」と同じ考え方で、現時点の販売口数と理論上の的中確率から
+// 「このまま的中者数が理論通りだとしたら、1人あたりこれくらい」を試算する。
+// 実際の的中者数によって最終的な配当額は変動するため、あくまで目安であり保証額ではない。
+export function estimateTierPayout(n, k, ticketCount, unitPrice, opts = {}) {
+  const { payoutRate = DEFAULT_PAYOUT_RATE, jackpotShare = DEFAULT_JACKPOT_SHARE, minExpectedWinners = 0.5 } = opts;
+  const share = tierShare(n, k, jackpotShare);
+  if (share === 0 || ticketCount <= 0) return 0;
+  const pool = ticketCount * unitPrice * payoutRate * share;
+  const expectedWinners = Math.max(ticketCount * probExactMatches(n, k), minExpectedWinners);
+  return Math.round(pool / expectedWinners);
 }
 
-export function payoutTableFromObject(obj) {
-  return new Map(Object.entries(obj).map(([k, v]) => [Number(k), v]));
-}
-
-export function computePayout(matchedCount, payoutTable, unitPrice) {
-  const multiplier = payoutTable.get(matchedCount) || 0;
-  return Math.round(unitPrice * multiplier);
+// 実際の精算(パリミュチュエル): 購入総額から確保したプールを、そのクラスの
+// 「実際の」当選口数で山分けする。当選者が1人もいなければそのクラスの配当は
+// 発生しない(繰越等の仕組みは今回のフェーズでは実装しない)。
+export function settleTierPayout(n, k, totalTicketCount, actualWinnerCount, unitPrice, opts = {}) {
+  const { payoutRate = DEFAULT_PAYOUT_RATE, jackpotShare = DEFAULT_JACKPOT_SHARE } = opts;
+  const share = tierShare(n, k, jackpotShare);
+  if (share === 0 || actualWinnerCount <= 0) return 0;
+  const pool = totalTicketCount * unitPrice * payoutRate * share;
+  return Math.round(pool / actualWinnerCount);
 }
 
 // 対象試合のうち最も早い試合開始時刻を、このくじ回の購入締切とする
@@ -84,13 +97,18 @@ export function getDrawDeadline(gameIds, gamesById) {
   return min === Infinity ? null : min;
 }
 
-// くじ回(draw)ドキュメントの中身を組み立てる。
-export function buildDraw(gameIds, unitPrice = DEFAULT_UNIT_PRICE) {
-  const n = gameIds.length;
-  const payoutTable = buildPayoutTable(n);
+// くじ回(draw)ドキュメントの中身を組み立てる。unit_price / payout_rate / jackpot_share は
+// くじ回ごとに変えられるようにしてある(週替わりで還元率や配分を調整したい場合を想定)。
+export function buildDraw(gameIds, opts = {}) {
+  const {
+    unitPrice = DEFAULT_UNIT_PRICE,
+    payoutRate = DEFAULT_PAYOUT_RATE,
+    jackpotShare = DEFAULT_JACKPOT_SHARE,
+  } = opts;
   return {
     game_ids: gameIds,
     unit_price: unitPrice,
-    payout_table: payoutTableToObject(payoutTable),
+    payout_rate: payoutRate,
+    jackpot_share: jackpotShare,
   };
 }

@@ -53,6 +53,19 @@
           <div>
             <p class="font-bold text-slate-300 mb-2">新しいくじ回を作成</p>
             <div id="admin-new-draw-games" class="space-y-1"></div>
+            <div class="flex flex-wrap items-center gap-3 mt-2 text-xs text-slate-400">
+              <label class="flex items-center gap-1">
+                還元率
+                <input id="admin-payout-rate" type="number" min="0.1" max="1" step="0.05" value="0.85"
+                       class="w-16 bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5" />
+              </label>
+              <label class="flex items-center gap-1">
+                1等配分比率
+                <input id="admin-jackpot-share" type="number" min="0.1" max="0.9" step="0.05" value="0.7"
+                       class="w-16 bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5" />
+              </label>
+              <span class="text-[10px] text-slate-500">(残りは2等〈1つ外れ〉に配分。回ごとに変更可)</span>
+            </div>
             <button id="admin-create-draw" type="button" class="mt-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg px-4 py-1.5">
               選択した試合でくじ回を作成
             </button>
@@ -85,8 +98,8 @@
     } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
     import { getTeam } from "./js/lottery-core.mjs";
     import {
-      DEFAULT_UNIT_PRICE, generateRandomPicks, countMatches,
-      payoutTableFromObject, computePayout,
+      DEFAULT_UNIT_PRICE, DEFAULT_PAYOUT_RATE, DEFAULT_JACKPOT_SHARE,
+      generateRandomPicks, countMatches, estimateTierPayout, settleTierPayout,
       getDrawDeadline, buildDraw,
     } from "./js/big-lottery-core.mjs";
 
@@ -238,15 +251,19 @@
       }
 
       const open = isDrawOpen(draw);
-      const payoutTable = payoutTableFromObject(draw.payout_table);
       const n = draw.game_ids.length;
-      const jackpotMultiplier = payoutTable.get(n) || 0;
-      const secondMultiplier = payoutTable.get(n - 1) || 0;
       const closesLabel = new Date(draw.closes_at).toLocaleString('ja-JP', {
         month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
       });
       const participantCount = (draw.participant_uids || []).length;
       const ticketCount = draw.ticket_count || 0;
+      const payoutOpts = { payoutRate: draw.payout_rate, jackpotShare: draw.jackpot_share };
+      const jackpotEstimate = estimateTierPayout(n, n, ticketCount, draw.unit_price, payoutOpts);
+      const secondEstimate = estimateTierPayout(n, n - 1, ticketCount, draw.unit_price, payoutOpts);
+      const estimateLabel = (amount) =>
+        ticketCount <= 0
+          ? '<span class="text-slate-500 text-sm">販売開始直後のため未定</span>'
+          : `<b class="text-lg">${(amount / draw.unit_price).toFixed(2)}倍</b><span class="text-slate-500 text-[10px]"> (目安${amount}pt)</span>`;
 
       const gamesRows = draw.game_ids
         .map((gameId) => {
@@ -291,13 +308,13 @@
           <ul class="space-y-1.5 mb-3">${gamesRows}</ul>
           <div class="grid grid-cols-2 gap-2 text-xs mb-3">
             <div class="bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 py-2 text-indigo-200">
-              全${n}試合的中(ジャックポット)<br><b class="text-lg">${jackpotMultiplier}倍</b>
+              全${n}試合的中(ジャックポット)<br>${estimateLabel(jackpotEstimate)}
             </div>
             <div class="bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 py-2 text-indigo-200">
-              ${n - 1}試合的中(1つ惜しい)<br><b class="text-lg">${secondMultiplier}倍</b>
+              ${n - 1}試合的中(1つ惜しい)<br>${estimateLabel(secondEstimate)}
             </div>
           </div>
-          <p class="text-[11px] text-slate-500 mb-2">1口 ${draw.unit_price}pt。予想は不要です — 購入するとシステムが全試合の勝敗をランダムに自動生成します。</p>
+          <p class="text-[11px] text-slate-500 mb-2">1口 ${draw.unit_price}pt。予想は不要です — 購入するとシステムが全試合の勝敗をランダムに自動生成します。上記はあくまで現時点の販売口数から算出した目安配当で、実際の配当は的中者の人数によって変動し、精算時に確定します。</p>
           <div class="text-xs text-slate-400 mb-2">🔥 今回の参加人数 ${participantCount}人 / 販売口数 ${ticketCount}口</div>
           ${purchaseBlock}
         </article>`;
@@ -468,8 +485,10 @@
         alert('くじ回には2試合以上を含めてください');
         return;
       }
+      const payoutRate = Math.min(1, Math.max(0.1, parseFloat(el('admin-payout-rate').value) || DEFAULT_PAYOUT_RATE));
+      const jackpotShare = Math.min(0.9, Math.max(0.1, parseFloat(el('admin-jackpot-share').value) || DEFAULT_JACKPOT_SHARE));
       try {
-        const drawData = buildDraw(checked, DEFAULT_UNIT_PRICE);
+        const drawData = buildDraw(checked, { unitPrice: DEFAULT_UNIT_PRICE, payoutRate, jackpotShare });
         const closesAtMs = getDrawDeadline(checked, gamesCache);
         const drawRef = doc(collection(db, 'draws'));
         await setDoc(drawRef, {
@@ -550,15 +569,27 @@
         return;
       }
 
+      // パリミュチュエル方式のため、まず全チケットの的中数を集計してから
+      // (このクラスに何人当選したか)を確定させ、その後で1口ずつ配当を計算する。
       const gamesById = new Map(draw.game_ids.map((id) => [id, gamesCache.get(id)]));
-      const payoutTable = payoutTableFromObject(draw.payout_table);
-      for (const ticketDoc of ticketsSnap.docs) {
-        const ticket = ticketDoc.data();
-        const { matched } = countMatches(ticket.picks, gamesById);
-        const payout = computePayout(matched, payoutTable, ticket.unit_price);
-        await updateDoc(doc(db, 'tickets', ticketDoc.id), { result: 'settled', matched_count: matched, payout });
+      const n = draw.game_ids.length;
+      const payoutOpts = { payoutRate: draw.payout_rate, jackpotShare: draw.jackpot_share };
+      const totalTicketCount = draw.ticket_count || ticketsSnap.size;
+
+      const ticketMatches = ticketsSnap.docs.map((ticketDoc) => ({
+        id: ticketDoc.id,
+        data: ticketDoc.data(),
+        matched: countMatches(ticketDoc.data().picks, gamesById).matched,
+      }));
+      const jackpotWinnerCount = ticketMatches.filter((t) => t.matched === n).length;
+      const secondWinnerCount = ticketMatches.filter((t) => t.matched === n - 1).length;
+
+      for (const t of ticketMatches) {
+        const winnerCount = t.matched === n ? jackpotWinnerCount : t.matched === n - 1 ? secondWinnerCount : 0;
+        const payout = settleTierPayout(n, t.matched, totalTicketCount, winnerCount, t.data.unit_price, payoutOpts);
+        await updateDoc(doc(db, 'tickets', t.id), { result: 'settled', matched_count: t.matched, payout });
         if (payout > 0) {
-          await creditUserPoints(ticket.user_id, payout, `ベースボールロト的中 +${payout}pt`);
+          await creditUserPoints(t.data.user_id, payout, `ベースボールロト的中 +${payout}pt`);
         }
       }
       await updateDoc(doc(db, 'draws', drawId), { status: 'settled' });
